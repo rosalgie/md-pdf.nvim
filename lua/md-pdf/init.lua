@@ -153,12 +153,26 @@ local function open_doc()
     end)
 end
 
+local function get_pandoc_version()
+    local result = vim.system({ "pandoc", "--version" }, { text = true }):wait()
+    local major, minor, patch, build = string.match(result.stdout, "(%d+)%.(%d+)%.(%d+)%.(%d+)")
+    local pandoc_version = {
+        major = tonumber(major),
+        minor = tonumber(minor),
+        patch = tonumber(patch),
+        build = tonumber(build),
+    }
+    log.error(vim.inspect(pandoc_version))
+    return pandoc_version
+end
+
 --- Converts markdown file to pdf. If called a second time, the automatic conversion is stopped
 function M.convert_md_to_pdf()
     if vim.bo.filetype ~= "markdown" then
         log.error("Filetype " .. vim.bo.filetype .. " not supported!")
         return
     end
+
 
     -- Get the absolute path of current file
     local fullname = vim.api.nvim_buf_get_name(0)
@@ -180,9 +194,16 @@ function M.convert_md_to_pdf()
         "geometry:margin=" .. config.options.margins,
         fullname,
         "--output=" .. pdf_output_path,
-        "--highlight-style=" .. config.options.highlight,
         "--resource-path=" .. file_dir,
     }
+
+    local version = get_pandoc_version()
+
+    if version.major >= 3 and version.minor >= 8 then
+        table.insert(pandoc_args, "--syntax-highlight=" .. config.options.highlight)
+    else
+        table.insert(pandoc_args, "--highlight-style=" .. config.options.highlight)
+    end
 
     local header_include
     if config.options.title_page then
