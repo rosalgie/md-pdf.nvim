@@ -245,9 +245,15 @@ function M.convert_md_to_pdf()
             pcall(vim.loop.fs_unlink, header_include)
         end
         -- Early exit in case of error
-        if obj.stderr ~= "" then
-            log.error(obj.stderr)
-            return
+        if obj.stderr ~= "" and obj.stderr ~= nil then
+            local warn_match = string.match(obj.stderr, "WARNING")
+            if warn_match ~= "" and warn_match ~= nil then
+                log.warn(obj.stderr)
+            else
+                -- only return in case an error was logged
+                log.error(obj.stderr)
+                return
+            end
         end
         if obj.stdout ~= "" then
             log.info(obj.stdout)
