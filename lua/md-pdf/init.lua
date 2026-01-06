@@ -153,6 +153,11 @@ local function open_doc()
     end)
 end
 
+local function get_pandoc_version()
+    local result = vim.system({ "pandoc", "--version" }, { text = true }):wait()
+    return utils.parse_semver(result.stdout)
+end
+
 --- Converts markdown file to pdf. If called a second time, the automatic conversion is stopped
 function M.convert_md_to_pdf()
     if vim.bo.filetype ~= "markdown" then
@@ -180,9 +185,16 @@ function M.convert_md_to_pdf()
         "geometry:margin=" .. config.options.margins,
         fullname,
         "--output=" .. pdf_output_path,
-        "--highlight-style=" .. config.options.highlight,
         "--resource-path=" .. file_dir,
     }
+
+    local version = get_pandoc_version()
+
+    if version.major >= 3 and version.minor >= 8 then
+        table.insert(pandoc_args, "--syntax-highlight=" .. config.options.highlight)
+    else -- also fallback to old style
+        table.insert(pandoc_args, "--highlight-style=" .. config.options.highlight)
+    end
 
     local header_include
     if config.options.title_page then
@@ -245,9 +257,15 @@ function M.convert_md_to_pdf()
             pcall(vim.loop.fs_unlink, header_include)
         end
         -- Early exit in case of error
-        if obj.stderr ~= "" then
-            log.error(obj.stderr)
-            return
+        if obj.stderr ~= "" and obj.stderr ~= nil then
+            local warn_match = string.match(obj.stderr, "WARNING")
+            if warn_match ~= "" and warn_match ~= nil then
+                log.warn(obj.stderr)
+            else
+                -- only return in case an error was logged
+                log.error(obj.stderr)
+                return
+            end
         end
         if obj.stdout ~= "" then
             log.info(obj.stdout)
