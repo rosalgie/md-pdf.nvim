@@ -3,7 +3,7 @@ local M = {}
 ---@class SemanticVersion
 ---@field major integer
 ---@field minor integer
----@field patch integer
+---@field patch integer?
 ---@field build_num integer?
 ---@field prerelease string?
 ---@field build string?
@@ -47,6 +47,7 @@ function M.log.error(str)
 end
 
 --- Parse semver into a table with components. Support following formats:
+--- - `1.2`
 --- - `v1.2.3`
 --- - `1.2.3`
 --- - `v1.2.3.4`
@@ -58,7 +59,6 @@ end
 function M.parse_semver(version)
     -- Try 4-part version first
     local major, minor, patch, build_num = version:match("v? (%d+)%.(%d+)%.(%d+)%.(%d+)")
-
     if major then
         -- 4-part version
         local prerelease = version:match("v?%d+%.%d+%.%d+%. %d+%-([^%+]+)")
@@ -77,22 +77,37 @@ function M.parse_semver(version)
 
     -- Try 3-part version
     major, minor, patch = version:match("v?(%d+)%.(%d+)%.(%d+)")
+    if major then
+        local prerelease = version:match("v?%d+%.%d+%.%d+%-([^%+]+)")
+        local build = version:match("v?%d+%.%d+%.%d+[^%+]*%+(.+)")
 
-    if not major then
-        return nil
+        return {
+            major = tonumber(major),
+            minor = tonumber(minor),
+            patch = tonumber(patch),
+            prerelease = prerelease,
+            build = build,
+            full = version:match("v?(%d+%.%d+%.%d+[%-%.%w]*[%+%.%w]*)"),
+        }
     end
 
-    local prerelease = version:match("v?%d+%.%d+%.%d+%-([^%+]+)")
-    local build = version:match("v?%d+%.%d+%.%d+[^%+]*%+(.+)")
+    -- Finally, try 2-part version
+    major, minor = version:match("v?(%d+)%.(%d+)")
+    if major then
+        local prerelease = version:match("v?%d+%.%d+%.%d+%-([^%+]+)")
+        local build = version:match("v?%d+%.%d+%.%d+[^%+]*%+(.+)")
 
-    return {
-        major = tonumber(major),
-        minor = tonumber(minor),
-        patch = tonumber(patch),
-        prerelease = prerelease,
-        build = build,
-        full = version:match("v?(%d+%.%d+%.%d+[%-%.%w]*[%+%.%w]*)"),
-    }
+        return {
+            major = tonumber(major),
+            minor = tonumber(minor),
+            prerelease = prerelease,
+            build = build,
+            full = version:match("v?(%d+%.%d+%.%d+[%-%.%w]*[%+%.%w]*)"),
+        }
+    end
+
+    -- no success in parsing values
+    return nil
 end
 
 return M
