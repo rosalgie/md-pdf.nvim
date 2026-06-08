@@ -210,6 +210,7 @@ function M.convert_md_to_pdf(bufnr)
     local function start_build()
         state.running = true
         state.pending = false
+        local start_time = vim.uv.hrtime()
 
         local fullname = vim.api.nvim_buf_get_name(bufnr)
         local file_dir = vim.fn.fnamemodify(fullname, ":h")
@@ -222,15 +223,33 @@ function M.convert_md_to_pdf(bufnr)
         state.pdf_output_path = output_dir .. "/" .. updated_file_name
         local temp_pdf = output_dir .. "/." .. file_name_without_ext .. ".md-pdf-tmp.pdf"
 
+        local engine = config.options.pdf_engine or "pdflatex"
+        local is_latex = engine:match("latex") or engine == "tectonic"
+
+        local cache_dir = output_dir .. "/.md-pdf-cache"
+        local tex_file = cache_dir .. "/" .. file_name_without_ext .. ".tex"
+
+        if is_latex then
+            vim.fn.mkdir(cache_dir, "p")
+        end
+
         local pandoc_args = {
             "pandoc",
             "--standalone",
             "-V",
             "geometry:margin=" .. config.options.margins,
             fullname,
-            "--output=" .. temp_pdf,
             "--resource-path=" .. file_dir,
         }
+
+        if is_latex then
+            table.insert(pandoc_args, "--output=" .. tex_file)
+        else
+            table.insert(pandoc_args, "--output=" .. temp_pdf)
+            if config.options.pdf_engine then
+                table.insert(pandoc_args, "--pdf-engine=" .. config.options.pdf_engine)
+            end
+        end
 
         local version = get_pandoc_version()
 
@@ -245,10 +264,6 @@ function M.convert_md_to_pdf(bufnr)
             local title_page_args
             title_page_args, header_include = build_title_page_args(fullname, file_dir)
             vim.list_extend(pandoc_args, title_page_args)
-        end
-
-        if config.options.pdf_engine then
-            table.insert(pandoc_args, "--pdf-engine=" .. config.options.pdf_engine)
         end
 
         if config.options.toc then
@@ -294,46 +309,41 @@ function M.convert_md_to_pdf(bufnr)
             end
         end
 
-        log.info("Markdown to PDF conversion started...")
-        vim.system(pandoc_args, { text = true }, function(obj)
-            if header_include then
-                pcall(vim.loop.fs_unlink, header_include)
-            end
-
+        local function finalize_build(obj, cmd_args, generated_pdf, is_cleanup_temp)
             vim.schedule(function()
                 if state.generation ~= expected_gen then
-                    -- Stale build, discard
-                    pcall(vim.loop.fs_unlink, temp_pdf)
+                    if is_cleanup_temp then
+                        pcall(vim.loop.fs_unlink, temp_pdf)
+                    end
                     state.running = false
                     if state.pending then
-                        expected_gen = state.generation
                         start_build()
                     end
                     return
                 end
 
                 if obj.code ~= 0 then
-                    pcall(vim.loop.fs_unlink, temp_pdf)
+                    if is_cleanup_temp then
+                        pcall(vim.loop.fs_unlink, temp_pdf)
+                    end
                     log.error(
                         "PDF conversion failed (exit code "
                             .. tostring(obj.code)
                             .. "). See :MdPdfLog for details."
                     )
-                    utils.show_build_log(obj, pandoc_args, true)
+                    utils.show_build_log(obj, cmd_args, true)
                     state.running = false
                     if state.pending then
-                        expected_gen = state.generation
                         start_build()
                     end
                     return
                 end
 
-                local ok, rename_err = vim.uv.fs_rename(temp_pdf, state.pdf_output_path)
+                local ok, rename_err = vim.uv.fs_rename(generated_pdf, state.pdf_output_path)
                 if not ok then
                     log.error("Failed to install PDF: " .. tostring(rename_err))
                     state.running = false
                     if state.pending then
-                        expected_gen = state.generation
                         start_build()
                     end
                     return
@@ -353,17 +363,64 @@ function M.convert_md_to_pdf(bufnr)
                     end
                 end
 
-                -- Always generate the log buffer in the background so :MdPdfLog works
-                utils.show_build_log(obj, pandoc_args, false)
+                utils.show_build_log(obj, cmd_args, false)
 
                 open_doc(state)
                 state.conv_started = true
                 state.running = false
 
+                local elapsed_ms = (vim.uv.hrtime() - start_time) / 1e6
+                log.info(string.format("PDF built in %.2fs", elapsed_ms / 1000))
+
                 if state.pending then
-                    expected_gen = state.generation
                     start_build()
                 end
+            end)
+        end
+
+        log.info("Markdown to PDF conversion started...")
+        vim.system(pandoc_args, { text = true }, function(pandoc_obj)
+            if header_include then
+                pcall(vim.loop.fs_unlink, header_include)
+            end
+
+            if not is_latex then
+                -- Single-step fallback
+                finalize_build(pandoc_obj, pandoc_args, temp_pdf, true)
+                return
+            end
+
+            -- If pandoc failed to generate .tex, abort early
+            if pandoc_obj.code ~= 0 then
+                finalize_build(pandoc_obj, pandoc_args, temp_pdf, true)
+                return
+            end
+
+            -- Run LaTeX engine
+            local engine_args = { engine }
+            if engine:match("latex") then
+                table.insert(engine_args, "-interaction=nonstopmode")
+                table.insert(engine_args, "-halt-on-error")
+                table.insert(engine_args, "-output-directory=" .. cache_dir)
+            elseif engine == "tectonic" then
+                table.insert(engine_args, "--outdir=" .. cache_dir)
+            end
+            table.insert(engine_args, tex_file)
+
+            vim.system(engine_args, { text = true, cwd = file_dir }, function(engine_obj)
+                local generated_pdf = cache_dir .. "/" .. file_name_without_ext .. ".pdf"
+
+                -- Combine outputs for the log
+                local combined_obj = {
+                    code = engine_obj.code,
+                    stdout = engine_obj.stdout,
+                    stderr = (pandoc_obj.stderr or "") .. "\n" .. (engine_obj.stderr or ""),
+                }
+
+                local full_cmd =
+                    { table.concat(pandoc_args, " ") .. " && " .. table.concat(engine_args, " ") }
+
+                finalize_build(combined_obj, full_cmd, generated_pdf, false)
             end)
         end)
     end
