@@ -256,23 +256,35 @@ function M.convert_md_to_pdf()
         if header_include then
             pcall(vim.loop.fs_unlink, header_include)
         end
-        -- Early exit in case of error
-        if obj.stderr ~= "" and obj.stderr ~= nil then
-            local warn_match = string.match(obj.stderr, "WARNING")
-            if warn_match ~= "" and warn_match ~= nil then
-                log.warn(obj.stderr)
-            else
-                -- only return in case an error was logged
-                log.error(obj.stderr)
+
+        vim.schedule(function()
+            if obj.code ~= 0 then
+                log.error(
+                    "PDF conversion failed (exit code "
+                        .. tostring(obj.code)
+                        .. "). See :MdPdfLog for details."
+                )
+                utils.show_build_log(obj, pandoc_args, true)
                 return
             end
-        end
-        if obj.stdout ~= "" then
-            log.info(obj.stdout)
-        end
-        log.info("Document conversion completed")
-        open_doc()
-        conv_started = true
+
+            local stderr = vim.trim(obj.stderr or "")
+            if stderr ~= "" then
+                local warning_count = 0
+                for _ in stderr:gmatch("[Ww][Aa][Rr][Nn]") do
+                    warning_count = warning_count + 1
+                end
+                if warning_count > 0 then
+                    log.warn(
+                        warning_count .. " warning(s) during conversion. See :MdPdfLog for details."
+                    )
+                end
+                utils.show_build_log(obj, pandoc_args, false)
+            end
+
+            open_doc()
+            conv_started = true
+        end)
     end)
 end
 
@@ -294,5 +306,9 @@ vim.api.nvim_create_autocmd("BufWritePost", {
         M.convert_md_to_pdf()
     end,
 })
+
+vim.api.nvim_create_user_command("MdPdfLog", function()
+    utils.open_last_log()
+end, { desc = "Show the last md-pdf build log" })
 
 return M
