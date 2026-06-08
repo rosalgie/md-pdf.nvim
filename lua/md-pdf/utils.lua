@@ -65,7 +65,7 @@ function M.show_build_log(result, command, failed)
     if failed then
         table.insert(lines, "md-pdf: build FAILED")
     else
-        table.insert(lines, "md-pdf: build log")
+        table.insert(lines, "md-pdf: build SUCCESS")
     end
 
     table.insert(lines, "")

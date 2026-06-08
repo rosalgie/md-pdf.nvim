@@ -351,8 +351,10 @@ function M.convert_md_to_pdf(bufnr)
                                 .. " warning(s) during conversion. See :MdPdfLog for details."
                         )
                     end
-                    utils.show_build_log(obj, pandoc_args, false)
                 end
+
+                -- Always generate the log buffer in the background so :MdPdfLog works
+                utils.show_build_log(obj, pandoc_args, false)
 
                 open_doc(state)
                 state.conv_started = true
