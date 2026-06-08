@@ -178,13 +178,15 @@ function M.convert_md_to_pdf()
     -- get a single string as a path
     pdf_output_path = output_dir .. "/" .. updated_file_name
 
+    local temp_pdf = output_dir .. "/." .. file_name_without_ext .. ".md-pdf-tmp.pdf"
+
     local pandoc_args = {
         "pandoc",
         "--standalone",
         "-V",
         "geometry:margin=" .. config.options.margins,
         fullname,
-        "--output=" .. pdf_output_path,
+        "--output=" .. temp_pdf,
         "--resource-path=" .. file_dir,
     }
 
@@ -259,12 +261,19 @@ function M.convert_md_to_pdf()
 
         vim.schedule(function()
             if obj.code ~= 0 then
+                pcall(vim.loop.fs_unlink, temp_pdf)
                 log.error(
                     "PDF conversion failed (exit code "
                         .. tostring(obj.code)
                         .. "). See :MdPdfLog for details."
                 )
                 utils.show_build_log(obj, pandoc_args, true)
+                return
+            end
+
+            local ok, rename_err = vim.uv.fs_rename(temp_pdf, pdf_output_path)
+            if not ok then
+                log.error("Failed to install PDF: " .. tostring(rename_err))
                 return
             end
 
