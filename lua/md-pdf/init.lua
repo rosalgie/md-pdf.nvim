@@ -8,9 +8,35 @@ local utils = require("md-pdf.utils")
 local log = utils.log
 
 local M = {}
-local viewer_open = false
-local conv_started = false
-local pdf_output_path = ""
+
+---@class MdPdfBuildState
+---@field generation integer
+---@field timer uv.uv_timer_t?
+---@field running boolean
+---@field pending boolean
+---@field viewer_open boolean
+---@field pdf_output_path string
+---@field conv_started boolean
+
+---@type table<integer, MdPdfBuildState>
+local builds = {}
+
+local function get_state(bufnr)
+    if bufnr == 0 or bufnr == nil then
+        bufnr = vim.api.nvim_get_current_buf()
+    end
+    if not builds[bufnr] then
+        builds[bufnr] = {
+            generation = 0,
+            running = false,
+            pending = false,
+            viewer_open = false,
+            pdf_output_path = "",
+            conv_started = false,
+        }
+    end
+    return builds[bufnr]
+end
 
 ---@param quoted_text string|nil
 ---@return string|nil
@@ -138,15 +164,15 @@ local function get_preview_command()
 end
 
 --- Opens the previewer
-local function open_doc()
-    if viewer_open then
+local function open_doc(state)
+    if state.viewer_open then
         return
     else
-        viewer_open = true
+        state.viewer_open = true
     end
 
-    vim.system({ get_preview_command(), pdf_output_path }, { text = true }, function()
-        viewer_open = false
+    vim.system({ get_preview_command(), state.pdf_output_path }, { text = true }, function()
+        state.viewer_open = false
         if not config.options.ignore_viewer_state then
             log.info("Document viewer closed!")
         end
@@ -164,143 +190,191 @@ local function get_pandoc_version()
     return cached_pandoc_version
 end
 
---- Converts markdown file to pdf. If called a second time, the automatic conversion is stopped
-function M.convert_md_to_pdf()
-    if vim.bo.filetype ~= "markdown" then
-        log.error("Filetype " .. vim.bo.filetype .. " not supported!")
+--- Converts markdown file to pdf. Starts auto-conversion on save.
+function M.convert_md_to_pdf(bufnr)
+    bufnr = bufnr or vim.api.nvim_get_current_buf()
+    if vim.bo[bufnr].filetype ~= "markdown" then
+        log.error("Filetype " .. vim.bo[bufnr].filetype .. " not supported!")
         return
     end
 
-    -- Get the absolute path of current file
-    local fullname = vim.api.nvim_buf_get_name(0)
-    local file_dir = vim.fn.fnamemodify(fullname, ":h")
-    local file_name_without_ext = vim.fn.fnamemodify(fullname, ":t:r")
-    local updated_file_name = file_name_without_ext .. ".pdf"
+    local state = get_state(bufnr)
+    state.generation = state.generation + 1
+    local expected_gen = state.generation
 
-    -- create dir if necessary
-    local output_dir = file_dir .. "/" .. config.options.output_path
-    vim.fn.mkdir(output_dir, "p")
-
-    -- get a single string as a path
-    pdf_output_path = output_dir .. "/" .. updated_file_name
-
-    local temp_pdf = output_dir .. "/." .. file_name_without_ext .. ".md-pdf-tmp.pdf"
-
-    local pandoc_args = {
-        "pandoc",
-        "--standalone",
-        "-V",
-        "geometry:margin=" .. config.options.margins,
-        fullname,
-        "--output=" .. temp_pdf,
-        "--resource-path=" .. file_dir,
-    }
-
-    local version = get_pandoc_version()
-
-    if version.major >= 3 and version.minor >= 8 then
-        table.insert(pandoc_args, "--syntax-highlight=" .. config.options.highlight)
-    else -- also fallback to old style
-        table.insert(pandoc_args, "--highlight-style=" .. config.options.highlight)
+    if state.running then
+        state.pending = true
+        return
     end
 
-    local header_include
-    if config.options.title_page then
-        local title_page_args
-        title_page_args, header_include = build_title_page_args(fullname, file_dir)
-        vim.list_extend(pandoc_args, title_page_args)
-    end
+    local function start_build()
+        state.running = true
+        state.pending = false
 
-    if config.options.pdf_engine then
-        table.insert(pandoc_args, "--pdf-engine=" .. config.options.pdf_engine)
-    end
+        local fullname = vim.api.nvim_buf_get_name(bufnr)
+        local file_dir = vim.fn.fnamemodify(fullname, ":h")
+        local file_name_without_ext = vim.fn.fnamemodify(fullname, ":t:r")
+        local updated_file_name = file_name_without_ext .. ".pdf"
 
-    if config.options.toc then
-        table.insert(pandoc_args, "--toc")
-    end
+        local output_dir = file_dir .. "/" .. config.options.output_path
+        vim.fn.mkdir(output_dir, "p")
 
-    if config.options.fonts then
-        local ftable = config.options.fonts
-        if ftable.main_font then
-            table.insert(pandoc_args, "-V")
-            table.insert(pandoc_args, "mainfont:" .. ftable.main_font)
+        state.pdf_output_path = output_dir .. "/" .. updated_file_name
+        local temp_pdf = output_dir .. "/." .. file_name_without_ext .. ".md-pdf-tmp.pdf"
+
+        local pandoc_args = {
+            "pandoc",
+            "--standalone",
+            "-V",
+            "geometry:margin=" .. config.options.margins,
+            fullname,
+            "--output=" .. temp_pdf,
+            "--resource-path=" .. file_dir,
+        }
+
+        local version = get_pandoc_version()
+
+        if version.major >= 3 and version.minor >= 8 then
+            table.insert(pandoc_args, "--syntax-highlight=" .. config.options.highlight)
+        else
+            table.insert(pandoc_args, "--highlight-style=" .. config.options.highlight)
         end
-        if ftable.sans_font then
-            table.insert(pandoc_args, "-V")
-            table.insert(pandoc_args, "sansfont:" .. ftable.sans_font)
-        end
-        if ftable.mono_font then
-            table.insert(pandoc_args, "-V")
-            table.insert(pandoc_args, "monofont:" .. ftable.mono_font)
-        end
-        if ftable.math_font then
-            table.insert(pandoc_args, "-V")
-            table.insert(pandoc_args, "mathfont:" .. ftable.math_font)
-        end
-    end
 
-    if config.options.pandoc_user_args then
-        for _, value in ipairs(config.options.pandoc_user_args) do
-            for token in string.gmatch(value, "[^%s]+") do
-                table.insert(pandoc_args, token)
+        local header_include
+        if config.options.title_page then
+            local title_page_args
+            title_page_args, header_include = build_title_page_args(fullname, file_dir)
+            vim.list_extend(pandoc_args, title_page_args)
+        end
+
+        if config.options.pdf_engine then
+            table.insert(pandoc_args, "--pdf-engine=" .. config.options.pdf_engine)
+        end
+
+        if config.options.toc then
+            table.insert(pandoc_args, "--toc")
+        end
+
+        if config.options.fonts then
+            local ftable = config.options.fonts
+            if ftable.main_font then
+                table.insert(pandoc_args, "-V")
+                table.insert(pandoc_args, "mainfont:" .. ftable.main_font)
+            end
+            if ftable.sans_font then
+                table.insert(pandoc_args, "-V")
+                table.insert(pandoc_args, "sansfont:" .. ftable.sans_font)
+            end
+            if ftable.mono_font then
+                table.insert(pandoc_args, "-V")
+                table.insert(pandoc_args, "monofont:" .. ftable.mono_font)
+            end
+            if ftable.math_font then
+                table.insert(pandoc_args, "-V")
+                table.insert(pandoc_args, "mathfont:" .. ftable.math_font)
             end
         end
-    end
 
-    -- Add courtesy warning in case of non-specified pdf engine
-    if config.options.fonts then
-        for _, value in ipairs(pandoc_args) do
-            if string.gmatch(value, "[pdflatex]") then
-                log.warn(
-                    "When specifying custom fonts, you may encounter utf-8 error. Consider switching to another engine, e.g., lualatex"
-                )
-                break
-            end
-        end
-    end
-
-    log.info("Markdown to PDF conversion started...")
-    vim.system(pandoc_args, { text = true }, function(obj)
-        if header_include then
-            pcall(vim.loop.fs_unlink, header_include)
-        end
-
-        vim.schedule(function()
-            if obj.code ~= 0 then
-                pcall(vim.loop.fs_unlink, temp_pdf)
-                log.error(
-                    "PDF conversion failed (exit code "
-                        .. tostring(obj.code)
-                        .. "). See :MdPdfLog for details."
-                )
-                utils.show_build_log(obj, pandoc_args, true)
-                return
-            end
-
-            local ok, rename_err = vim.uv.fs_rename(temp_pdf, pdf_output_path)
-            if not ok then
-                log.error("Failed to install PDF: " .. tostring(rename_err))
-                return
-            end
-
-            local stderr = vim.trim(obj.stderr or "")
-            if stderr ~= "" then
-                local warning_count = 0
-                for _ in stderr:gmatch("[Ww][Aa][Rr][Nn]") do
-                    warning_count = warning_count + 1
+        if config.options.pandoc_user_args then
+            for _, value in ipairs(config.options.pandoc_user_args) do
+                for token in string.gmatch(value, "[^%s]+") do
+                    table.insert(pandoc_args, token)
                 end
-                if warning_count > 0 then
+            end
+        end
+
+        if config.options.fonts then
+            for _, value in ipairs(pandoc_args) do
+                if string.gmatch(value, "[pdflatex]") then
                     log.warn(
-                        warning_count .. " warning(s) during conversion. See :MdPdfLog for details."
+                        "When specifying custom fonts, you may encounter utf-8 error. Consider switching to another engine, ex. lualatex :)"
                     )
+                    break
                 end
-                utils.show_build_log(obj, pandoc_args, false)
+            end
+        end
+
+        log.info("Markdown to PDF conversion started...")
+        vim.system(pandoc_args, { text = true }, function(obj)
+            if header_include then
+                pcall(vim.loop.fs_unlink, header_include)
             end
 
-            open_doc()
-            conv_started = true
+            vim.schedule(function()
+                if state.generation ~= expected_gen then
+                    -- Stale build, discard
+                    pcall(vim.loop.fs_unlink, temp_pdf)
+                    state.running = false
+                    if state.pending then
+                        expected_gen = state.generation
+                        start_build()
+                    end
+                    return
+                end
+
+                if obj.code ~= 0 then
+                    pcall(vim.loop.fs_unlink, temp_pdf)
+                    log.error(
+                        "PDF conversion failed (exit code "
+                            .. tostring(obj.code)
+                            .. "). See :MdPdfLog for details."
+                    )
+                    utils.show_build_log(obj, pandoc_args, true)
+                    state.running = false
+                    if state.pending then
+                        expected_gen = state.generation
+                        start_build()
+                    end
+                    return
+                end
+
+                local ok, rename_err = vim.uv.fs_rename(temp_pdf, state.pdf_output_path)
+                if not ok then
+                    log.error("Failed to install PDF: " .. tostring(rename_err))
+                    state.running = false
+                    if state.pending then
+                        expected_gen = state.generation
+                        start_build()
+                    end
+                    return
+                end
+
+                local stderr = vim.trim(obj.stderr or "")
+                if stderr ~= "" then
+                    local warning_count = 0
+                    for _ in stderr:gmatch("[Ww][Aa][Rr][Nn]") do
+                        warning_count = warning_count + 1
+                    end
+                    if warning_count > 0 then
+                        log.warn(
+                            warning_count
+                                .. " warning(s) during conversion. See :MdPdfLog for details."
+                        )
+                    end
+                    utils.show_build_log(obj, pandoc_args, false)
+                end
+
+                open_doc(state)
+                state.conv_started = true
+                state.running = false
+
+                if state.pending then
+                    expected_gen = state.generation
+                    start_build()
+                end
+            end)
         end)
-    end)
+    end
+
+    start_build()
+end
+
+--- Stops automatic conversion for the given buffer
+function M.stop_auto_conversion(bufnr)
+    bufnr = bufnr or vim.api.nvim_get_current_buf()
+    local state = get_state(bufnr)
+    state.conv_started = false
+    log.info("Stopped auto-conversion for current buffer")
 end
 
 local mdaugroup = vim.api.nvim_create_augroup("md-pdf", { clear = true })
@@ -308,19 +382,64 @@ local mdaugroup = vim.api.nvim_create_augroup("md-pdf", { clear = true })
 vim.api.nvim_create_autocmd("BufWritePost", {
     group = mdaugroup,
     pattern = "*.md",
-    callback = function()
-        -- Skip auto conversion if we are considering the viewer state, which can be annoying
-        -- with applications such as firefox.
-        if not config.options.ignore_viewer_state and not viewer_open then
+    callback = function(ev)
+        local bufnr = ev.buf
+        local state = get_state(bufnr)
+
+        if not config.options.ignore_viewer_state and not state.viewer_open then
             return
         end
-        -- Also skip auto conversion, if we have not yet initiated such conversion.
-        if not conv_started then
+        if not state.conv_started then
             return
         end
-        M.convert_md_to_pdf()
+
+        if state.timer then
+            state.timer:stop()
+            state.timer:close()
+        end
+
+        state.timer = vim.uv.new_timer()
+        state.timer:start(
+            300,
+            0,
+            vim.schedule_wrap(function()
+                if state.timer then
+                    state.timer:stop()
+                    state.timer:close()
+                    state.timer = nil
+                end
+                if vim.api.nvim_buf_is_valid(bufnr) then
+                    M.convert_md_to_pdf(bufnr)
+                end
+            end)
+        )
     end,
 })
+
+-- Cleanup state when buffer is deleted
+vim.api.nvim_create_autocmd("BufDelete", {
+    group = mdaugroup,
+    pattern = "*.md",
+    callback = function(ev)
+        local bufnr = ev.buf
+        local state = builds[bufnr]
+        if state then
+            if state.timer then
+                state.timer:stop()
+                state.timer:close()
+            end
+            builds[bufnr] = nil
+        end
+    end,
+})
+
+vim.api.nvim_create_user_command("MdPdf", function()
+    M.convert_md_to_pdf()
+end, { desc = "Convert current markdown buffer to PDF" })
+
+vim.api.nvim_create_user_command("MdPdfStop", function()
+    M.stop_auto_conversion()
+end, { desc = "Stop auto-conversion for current buffer" })
 
 vim.api.nvim_create_user_command("MdPdfLog", function()
     utils.open_last_log()
