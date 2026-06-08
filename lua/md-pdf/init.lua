@@ -153,9 +153,15 @@ local function open_doc()
     end)
 end
 
+local cached_pandoc_version = nil
+
 local function get_pandoc_version()
+    if cached_pandoc_version then
+        return cached_pandoc_version
+    end
     local result = vim.system({ "pandoc", "--version" }, { text = true }):wait()
-    return utils.parse_semver(result.stdout)
+    cached_pandoc_version = utils.parse_semver(result.stdout)
+    return cached_pandoc_version
 end
 
 --- Converts markdown file to pdf. If called a second time, the automatic conversion is stopped
