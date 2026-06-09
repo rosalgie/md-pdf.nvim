@@ -23,6 +23,8 @@ local defaults = {
     highlight = "tango",
     ---@type boolean Generate a table of contents, on by default
     toc = true,
+    ---@type boolean Disable TOC during auto-saves to speed up previews
+    preview_toc = false,
     ---@type boolean Render a separate title page (followed by an optional TOC page)
     title_page = false,
     ---@type function The command to open the pdf with

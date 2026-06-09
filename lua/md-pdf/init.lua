@@ -17,6 +17,7 @@ local M = {}
 ---@field viewer_open boolean
 ---@field pdf_output_path string
 ---@field conv_started boolean
+---@field next_is_auto boolean?
 
 ---@type table<integer, MdPdfBuildState>
 local builds = {}
@@ -33,6 +34,7 @@ local function get_state(bufnr)
             viewer_open = false,
             pdf_output_path = "",
             conv_started = false,
+            next_is_auto = false,
         }
     end
     return builds[bufnr]
@@ -191,7 +193,7 @@ local function get_pandoc_version()
 end
 
 --- Converts markdown file to pdf. Starts auto-conversion on save.
-function M.convert_md_to_pdf(bufnr)
+function M.convert_md_to_pdf(bufnr, is_auto)
     bufnr = bufnr or vim.api.nvim_get_current_buf()
     if vim.bo[bufnr].filetype ~= "markdown" then
         log.error("Filetype " .. vim.bo[bufnr].filetype .. " not supported!")
@@ -200,6 +202,7 @@ function M.convert_md_to_pdf(bufnr)
 
     local state = get_state(bufnr)
     state.generation = state.generation + 1
+    state.next_is_auto = is_auto
     local expected_gen = state.generation
 
     if state.running then
@@ -211,6 +214,7 @@ function M.convert_md_to_pdf(bufnr)
         state.running = true
         state.pending = false
         local start_time = vim.uv.hrtime()
+        local current_is_auto = state.next_is_auto
 
         local fullname = vim.api.nvim_buf_get_name(bufnr)
         local file_dir = vim.fn.fnamemodify(fullname, ":h")
@@ -266,7 +270,12 @@ function M.convert_md_to_pdf(bufnr)
             vim.list_extend(pandoc_args, title_page_args)
         end
 
-        if config.options.toc then
+        local use_toc = config.options.toc
+        if current_is_auto and config.options.preview_toc == false then
+            use_toc = false
+        end
+
+        if use_toc then
             table.insert(pandoc_args, "--toc")
         end
 
@@ -468,7 +477,7 @@ vim.api.nvim_create_autocmd("BufWritePost", {
                     state.timer = nil
                 end
                 if vim.api.nvim_buf_is_valid(bufnr) then
-                    M.convert_md_to_pdf(bufnr)
+                    M.convert_md_to_pdf(bufnr, true)
                 end
             end)
         )
